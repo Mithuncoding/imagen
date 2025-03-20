@@ -1608,54 +1608,94 @@
             img.src = imageUrl;
         }
         
-        function addToHistory(promptText, imageUrl) {
-            // Remove empty history message if present
-            const emptyHistory = document.querySelector('.empty-history');
-            if (emptyHistory) {
-                emptyHistory.remove();
-            }
-            
-            // Create history item
-            const historyItem = document.createElement('div');
-            historyItem.className = 'history-item';
-            historyItem.dataset.imageUrl = imageUrl;
-            historyItem.dataset.prompt = promptText;
-            
-            const timestamp = new Date();
-            
-            historyItem.innerHTML = `
-                <div class="history-prompt">${promptText}</div>
-                <div class="history-timestamp">${timestamp.toLocaleString()}</div>
-            `;
-            
-            // Add click event to reload this image
-            historyItem.addEventListener('click', () => {
-                displayImage(imageUrl, promptText);
-                tabs[0].click(); // Switch to generate tab
-            });
-            
-            // Add to history list (at the beginning)
-            historyList.insertBefore(historyItem, historyList.firstChild);
-            
-            // Save to localStorage
-            saveHistory();
-        }
-        
+        // Fix the Storage Quota issue when saving history
         function saveHistory() {
             const historyItems = document.querySelectorAll('.history-item');
             const history = [];
             
+            // Limit history to most recent 10 items to prevent storage quota issues
+            const maxItems = 10;
+            let count = 0;
+            
             historyItems.forEach(item => {
-                history.push({
-                    prompt: item.dataset.prompt,
-                    imageUrl: item.dataset.imageUrl,
-                    timestamp: item.querySelector('.history-timestamp').textContent
-                });
+                if (count < maxItems) {
+                    // For images, store a thumbnail version instead of full data URL
+                    let imageUrl = item.dataset.imageUrl;
+                    
+                    // If it's a data URL, create a thumbnail to save space
+                    if (imageUrl && imageUrl.startsWith('data:image')) {
+                        try {
+                            // Create thumbnail from full image
+                            imageUrl = createThumbnail(imageUrl, 200); // 200px max dimension thumbnail
+                        } catch (e) {
+                            console.warn('Failed to create thumbnail, using original URL');
+                        }
+                    }
+                    
+                    history.push({
+                        prompt: item.dataset.prompt,
+                        imageUrl: imageUrl,
+                        timestamp: item.querySelector('.history-timestamp').textContent
+                    });
+                    
+                    count++;
+                }
             });
             
-            localStorage.setItem('imageHistory', JSON.stringify(history));
+            try {
+                localStorage.setItem('imageHistory', JSON.stringify(history));
+            } catch (e) {
+                console.error('Storage quota exceeded, clearing history and retrying');
+                // If storage is full, clear it and try again with just the current item
+                localStorage.removeItem('imageHistory');
+                
+                if (history.length > 0) {
+                    try {
+                        localStorage.setItem('imageHistory', JSON.stringify([history[0]]));
+                    } catch (err) {
+                        console.error('Still cannot save to localStorage, disabling history');
+                        showNotification('History saving disabled - browser storage full', 'warning');
+                    }
+                }
+            }
         }
         
+        // Create a thumbnail from a data URL to save storage space
+        function createThumbnail(dataUrl, maxDimension) {
+            // Create an image element
+            const img = new Image();
+            img.src = dataUrl;
+            
+            // Create a canvas for the thumbnail
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Calculate new dimensions
+            let width = img.width;
+            let height = img.height;
+            
+            if (width > height) {
+                if (width > maxDimension) {
+                    height = Math.round(height * maxDimension / width);
+                    width = maxDimension;
+                }
+            } else {
+                if (height > maxDimension) {
+                    width = Math.round(width * maxDimension / height);
+                    height = maxDimension;
+                }
+            }
+            
+            // Set canvas dimensions and draw the thumbnail
+            canvas.width = width;
+            canvas.height = height;
+            ctx.drawImage(img, 0, 0, width, height);
+            
+            // Return as JPEG data URL with reduced quality (0.6 = 60% quality)
+            return canvas.toDataURL('image/jpeg', 0.6);
+        }
+        
+        // Fix the loadHistory function to handle invalid URLs
         function loadHistory() {
             try {
                 const history = JSON.parse(localStorage.getItem('imageHistory') || '[]');
@@ -1666,20 +1706,38 @@
                     
                     // Add items
                     history.forEach(item => {
+                        // Validate the URL before using it
+                        let validImageUrl = item.imageUrl;
+                        
+                        // Check if URL is valid or provide a fallback
+                        if (!isValidUrl(validImageUrl)) {
+                            console.warn('Invalid URL in history item:', validImageUrl);
+                            validImageUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='; // 1x1 transparent pixel
+                        }
+                        
                         const historyItem = document.createElement('div');
                         historyItem.className = 'history-item';
-                        historyItem.dataset.imageUrl = item.imageUrl;
-                        historyItem.dataset.prompt = item.prompt;
+                        historyItem.dataset.imageUrl = validImageUrl;
+                        historyItem.dataset.prompt = item.prompt || 'Unknown prompt';
                         
                         historyItem.innerHTML = `
-                            <div class="history-prompt">${item.prompt}</div>
-                            <div class="history-timestamp">${item.timestamp}</div>
+                            <div class="history-prompt">${item.prompt || 'Unknown prompt'}</div>
+                            <div class="history-timestamp">${item.timestamp || new Date().toLocaleString()}</div>
                         `;
                         
                         // Add click event to reload this image
                         historyItem.addEventListener('click', () => {
-                            displayImage(item.imageUrl, item.prompt);
-                            tabs[0].click(); // Switch to generate tab
+                            try {
+                                if (validImageUrl === 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=') {
+                                    showNotification('Original image data is no longer available', 'warning');
+                                    return;
+                                }
+                                displayImage(validImageUrl, item.prompt || 'Unknown prompt');
+                                tabs[0].click(); // Switch to generate tab
+                            } catch (err) {
+                                console.error('Error displaying image from history:', err);
+                                showNotification('Failed to load this image', 'error');
+                            }
                         });
                         
                         historyList.appendChild(historyItem);
@@ -1688,6 +1746,26 @@
             } catch (error) {
                 console.error('Error loading history:', error);
                 localStorage.removeItem('imageHistory'); // Reset if corrupted
+                showNotification('History data was corrupted and has been reset', 'warning');
+            }
+        }
+        
+        // Helper function to validate URLs
+        function isValidUrl(url) {
+            if (!url) return false;
+            
+            // Check if it's a data URL
+            if (url.startsWith('data:image/')) {
+                // Validate data URL format (simple check)
+                return url.includes('base64,');
+            }
+            
+            // Check if it's a standard URL
+            try {
+                new URL(url);
+                return true;
+            } catch (e) {
+                return false;
             }
         }
         
@@ -1751,47 +1829,208 @@
             }
         });
         
+        // Improved loadImageToCanvas function to handle invalid URLs
         function loadImageToCanvas(src) {
-            const img = new Image();
+            // Validate the URL first
+            if (!isValidUrl(src)) {
+                console.error('Invalid URL format:', src);
+                handleImageLoadError('Invalid URL format');
+                return;
+            }
             
-            img.crossOrigin = "Anonymous"; // Important for CORS issues
+            // Show loading indicator
+            editorContext.fillStyle = '#f8f9fa';
+            editorContext.fillRect(0, 0, editorCanvas.width, editorCanvas.height);
+            editorContext.fillStyle = '#343a40';
+            editorContext.font = '16px Arial';
+            editorContext.textAlign = 'center';
+            editorContext.fillText('Loading image...', editorCanvas.width / 2, editorCanvas.height / 2);
+            
+            // Handle different URL types
+            if (src.startsWith('data:image/')) {
+                // For data URLs
+                loadDataUrlImage(src);
+            } else {
+                // For regular URLs
+                loadRegularUrlImage(src);
+            }
+        }
+        
+        // Function to load images from data URLs
+        function loadDataUrlImage(dataUrl) {
+            // For very long data URLs, use a blob URL instead to avoid URL length limits
+            try {
+                // For extremely long data URLs, convert to Blob URL
+                if (dataUrl.length > 500000) { // If more than ~500KB
+                    const byteString = atob(dataUrl.split(',')[1]);
+                    const mimeType = dataUrl.split(',')[0].split(':')[1].split(';')[0];
+                    const arrayBuffer = new ArrayBuffer(byteString.length);
+                    const uint8Array = new Uint8Array(arrayBuffer);
+                    
+                    for (let i = 0; i < byteString.length; i++) {
+                        uint8Array[i] = byteString.charCodeAt(i);
+                    }
+                    
+                    const blob = new Blob([arrayBuffer], {type: mimeType});
+                    const blobUrl = URL.createObjectURL(blob);
+                    
+                    // Load the blob URL instead
+                    loadRegularUrlImage(blobUrl, true);
+                    return;
+                }
+                
+                // For manageable length data URLs
+                const img = new Image();
+                img.crossOrigin = "Anonymous";
+                
+                img.onload = () => {
+                    processLoadedImage(img);
+                };
+                
+                img.onerror = () => {
+                    console.error('Error loading data URL image');
+                    handleImageLoadError('Data URL image failed to load');
+                };
+                
+                // Use setTimeout to give browser more time to process
+                setTimeout(() => {
+                    img.src = dataUrl;
+                }, 50);
+            } catch (e) {
+                console.error('Error processing data URL:', e);
+                handleImageLoadError('Data URL processing error');
+            }
+        }
+        
+        // Function to load images from regular URLs
+        function loadRegularUrlImage(url, isBlob = false) {
+            const img = new Image();
+            img.crossOrigin = "Anonymous";
             
             img.onload = () => {
-                // Resize canvas to match image dimensions, with a maximum size to prevent performance issues
+                processLoadedImage(img);
+                // Clean up blob URL if we created one
+                if (isBlob) {
+                    URL.revokeObjectURL(url);
+                }
+            };
+            
+            img.onerror = () => {
+                console.error('Failed to load image from URL:', url);
+                handleImageLoadError('URL image failed to load');
+                
+                // Clean up blob URL if we created one
+                if (isBlob) {
+                    URL.revokeObjectURL(url);
+                }
+            };
+            
+            // Add a random parameter to bypass cache for HTTP URLs
+            if (!isBlob && !url.startsWith('data:') && !url.startsWith('blob:')) {
+                url = url.includes('?') ? `${url}&nocache=${Date.now()}` : `${url}?nocache=${Date.now()}`;
+            }
+            
+            img.src = url;
+        }
+        
+        // Common function to handle image loading errors
+        function handleImageLoadError(reason) {
+            // Create a placeholder image to show in the editor
+            editorContext.fillStyle = '#f8f9fa';
+            editorContext.fillRect(0, 0, editorCanvas.width, editorCanvas.height);
+            
+            // Draw an error icon or message
+            editorContext.fillStyle = '#343a40';
+            editorContext.font = '18px Arial';
+            editorContext.textAlign = 'center';
+            editorContext.fillText('⚠️ Failed to load image', editorCanvas.width / 2, editorCanvas.height / 2 - 20);
+            editorContext.font = '14px Arial';
+            editorContext.fillText(reason, editorCanvas.width / 2, editorCanvas.height / 2 + 10);
+            editorContext.fillText('Try uploading a different image', editorCanvas.width / 2, editorCanvas.height / 2 + 40);
+            
+            showNotification('Failed to load image for editing: ' + reason, 'error');
+        }
+        
+        // Process successfully loaded images
+        function processLoadedImage(img) {
+            try {
+                // Get dimensions while respecting maximum sizes
                 const maxDim = 1200;
                 let width = img.width;
                 let height = img.height;
                 
                 if (width > maxDim || height > maxDim) {
                     if (width > height) {
-                        height = (height / width) * maxDim;
+                        height = Math.round((height / width) * maxDim);
                         width = maxDim;
                     } else {
-                        width = (width / height) * maxDim;
+                        width = Math.round((width / height) * maxDim);
                         height = maxDim;
                     }
                 }
                 
+                // Enforce minimum dimensions
+                width = Math.max(width, 300);
+                height = Math.max(height, 200);
+                
+                // Set canvas dimensions
                 editorCanvas.width = width;
                 editorCanvas.height = height;
                 
-                // Clear canvas and draw image
+                // Clear and draw image
                 editorContext.clearRect(0, 0, width, height);
                 editorContext.drawImage(img, 0, 0, width, height);
                 
-                // Store original image data for filter resets
-                window.originalImageData = editorContext.getImageData(0, 0, width, height);
+                // Save original image data for resets
+                try {
+                    window.originalImageData = editorContext.getImageData(0, 0, width, height);
+                } catch (e) {
+                    console.error('Error getting image data:', e);
+                    if (e.name === 'SecurityError') {
+                        showNotification('Cannot edit cross-origin image. Try uploading locally.', 'error');
+                    } else {
+                        showNotification('Error processing image data', 'error');
+                    }
+                    return;
+                }
+                
+                // Reset edit states
+                window.lastImageData = null;
+                resetEditTools();
                 
                 showNotification('Image loaded for editing', 'success');
-            };
+            } catch (e) {
+                console.error('Error processing loaded image:', e);
+                handleImageLoadError('Image processing error');
+            }
+        }
+        
+        // Helper function to reset all editing tools
+        function resetEditTools() {
+            // Remove active class from all tools
+            editTools.forEach(tool => tool.classList.remove('active'));
             
-            img.onerror = () => {
-                showNotification('Failed to load image for editing', 'error');
-                console.error('Failed to load image for canvas:', src);
-            };
+            // Hide all control panels
+            brightnessControl.style.display = 'none';
+            contrastControl.style.display = 'none';
+            saturationControl.style.display = 'none';
+            blurControl.style.display = 'none';
+            sharpenControl.style.display = 'none';
+            textControl.style.display = 'none';
+            filterGallery.style.display = 'none';
             
-            // Add a random parameter to bypass cache issues
-            img.src = src.includes('?') ? `${src}&nocache=${Date.now()}` : `${src}?nocache=${Date.now()}`;
+            if (document.getElementById('draw-control')) {
+                document.getElementById('draw-control').style.display = 'none';
+            }
+            
+            // Reset any ongoing editing operations
+            isDrawing = false;
+            isCropping = false;
+            
+            // Hide any editing overlays
+            if (cropOverlay && cropOverlay.style) {
+                cropOverlay.style.display = 'none';
+            }
         }
         
         // Share image
